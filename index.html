@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Spotify Now Playing</title>
+  <style>
+    *{box-sizing:border-box} body{margin:0;background:transparent;color:#fff;font-family:Inter,Arial,sans-serif}
+    .wrap{width:100%;max-width:560px;padding:14px}.card{display:flex;gap:14px;align-items:center;
+      padding:14px 16px;border:1px solid rgba(255,255,255,.12);border-radius:18px;
+      background:rgba(10,10,14,.88);backdrop-filter:blur(12px);box-shadow:0 12px 35px rgba(0,0,0,.35)}
+    img{width:76px;height:76px;border-radius:12px;object-fit:cover;background:#222}
+    .info{min-width:0;flex:1}.title{font-size:18px;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .artist{margin-top:5px;color:#b8b8c2;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .status{margin-top:9px;font-size:11px;color:#8ee6a8;text-transform:uppercase;letter-spacing:.08em}
+    .bar{height:4px;background:#35353d;border-radius:9px;margin-top:10px;overflow:hidden}.progress{height:100%;width:0;background:#1ed760}
+    .login{display:inline-flex;align-items:center;justify-content:center;padding:11px 16px;border:0;border-radius:999px;
+      background:#1ed760;color:#061007;font-weight:800;cursor:pointer}
+    .hint{color:#aaa;font-size:12px;margin-top:8px}.hidden{display:none}
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <div id="loginView" class="card">
+    <div class="info">
+      <div class="title">Spotify Now Playing</div>
+      <div class="artist">Connect Spotify to show your current song.</div>
+      <div style="margin-top:12px"><button class="login" id="loginBtn">Connect Spotify</button></div>
+      <div class="hint">For OBS/TikTok LIVE Studio, use this page as a browser/web source.</div>
+    </div>
+  </div>
+
+  <div id="playerView" class="card hidden">
+    <img id="art" alt="Album artwork">
+    <div class="info">
+      <div class="title" id="title">Not playing</div>
+      <div class="artist" id="artist">—</div>
+      <div class="status" id="status">Paused</div>
+      <div class="bar"><div class="progress" id="progress"></div></div>
+    </div>
+  </div>
+</div>
+<script>
+const CLIENT_ID = "PASTE_YOUR_SPOTIFY_CLIENT_ID_HERE";
+const REDIRECT_URI = window.location.origin + window.location.pathname;
+const SCOPES = "user-read-currently-playing user-read-playback-state";
+const $ = id => document.getElementById(id);
+
+function base64url(bytes){return btoa(String.fromCharCode(...new Uint8Array(bytes))).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"")}
+async function sha256(s){return crypto.subtle.digest("SHA-256",new TextEncoder().encode(s))}
+function randomString(n=64){const a=new Uint8Array(n);crypto.getRandomValues(a);return base64url(a)}
+async function connect(){
+  if(CLIENT_ID.includes("PASTE_")){alert("Open index.html and paste your Spotify Client ID into CLIENT_ID first.");return}
+  const verifier=randomString();
+  localStorage.setItem("sp_pkce_verifier",verifier);
+  const challenge=base64url(await sha256(verifier));
+  const state=randomString(24);
+  localStorage.setItem("sp_state",state);
+  const u=new URL("https://accounts.spotify.com/authorize");
+  u.search=new URLSearchParams({client_id:CLIENT_ID,response_type:"code",redirect_uri:REDIRECT_URI,
+    scope:SCOPES,code_challenge_method:"S256",code_challenge:challenge,state}).toString();
+  location.href=u;
+}
+async function tokenFromCode(code){
+  const verifier=localStorage.getItem("sp_pkce_verifier");
+  const body=new URLSearchParams({client_id:CLIENT_ID,grant_type:"authorization_code",code,
+    redirect_uri:REDIRECT_URI,code_verifier:verifier});
+  const r=await fetch("https://accounts.spotify.com/api/token",{method:"POST",
+    headers:{"Content-Type":"application/x-www-form-urlencoded"},body});
+  if(!r.ok) throw new Error("Token request failed");
+  const d=await r.json();
+  localStorage.setItem("sp_access_token",d.access_token);
+  if(d.refresh_token)localStorage.setItem("sp_refresh_token",d.refresh_token);
+  history.replaceState({},document.title,REDIRECT_URI);
+}
+async function refreshToken(){
+  const rt=localStorage.getItem("sp_refresh_token"); if(!rt)return null;
+  const r=await fetch("https://accounts.spotify.com/api/token",{method:"POST",
+    headers:{"Content-Type":"application/x-www-form-urlencoded"},
+    body:new URLSearchParams({client_id:CLIENT_ID,grant_type:"refresh_token",refresh_token:rt})});
+  if(!r.ok)return null; const d=await r.json();
+  localStorage.setItem("sp_access_token",d.access_token); return d.access_token;
+}
+async function api(){
+  let token=localStorage.getItem("sp_access_token"); if(!token)return null;
+  let r=await fetch("https://api.spotify.com/v1/me/player/currently-playing",{headers:{Authorization:"Bearer "+token}});
+  if(r.status===401){token=await refreshToken(); if(!token)return null;
+    r=await fetch("https://api.spotify.com/v1/me/player/currently-playing",{headers:{Authorization:"Bearer "+token}})}
+  if(r.status===204)return null; if(!r.ok)throw new Error("Spotify API error "+r.status); return r.json();
+}
+function show(d){
+  $("loginView").classList.add("hidden"); $("playerView").classList.remove("hidden");
+  if(!d || !d.item){$("title").textContent="Nothing playing";$("artist").textContent="";$("status").textContent="Paused";$("progress").style.width="0%";return}
+  const item=d.item; $("title").textContent=item.name||"Unknown";
+  $("artist").textContent=(item.artists||[]).map(a=>a.name).join(", ")||"Unknown artist";
+  $("status").textContent=d.is_playing?"Playing":"Paused";
+  $("status").style.color=d.is_playing?"#8ee6a8":"#c9c9d1";
+  const img=item.album?.images?.[0]?.url; if(img)$("art").src=img;
+  const pct=item.duration_ms?Math.min(100,((d.progress_ms||0)/item.duration_ms)*100):0;
+  $("progress").style.width=pct+"%";
+}
+$("loginBtn").onclick=connect;
+(async()=>{
+  try{
+    const p=new URLSearchParams(location.search), code=p.get("code"), state=p.get("state");
+    if(code){
+      if(state!==localStorage.getItem("sp_state")) throw new Error("State check failed");
+      await tokenFromCode(code); localStorage.removeItem("sp_state");
+    }
+    if(localStorage.getItem("sp_access_token")){show(await api());setInterval(async()=>{try{show(await api())}catch(e){}},5000)}
+  }catch(e){console.error(e);alert("Spotify connection failed. Check your Redirect URI and Client ID.")}
+})();
+</script>
+</body>
+</html>
